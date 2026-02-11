@@ -10,7 +10,7 @@
 
   exe已打包依赖库 可直接使用
 
- 感谢 [书伴](https://bookfere.com/post/92.html#kg_1)  提供的kindlegen文件
+ ❤️❤️❤️感谢 [书伴](https://bookfere.com/post/92.html#kg_1)  提供的kindlegen文件❤️❤️❤️
   
 ## 🚀 文件下载
  [点击下载repack.zip](https://github.com/jinbasex/mobirepack-for-MZY/releases)
