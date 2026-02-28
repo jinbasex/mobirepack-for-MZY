@@ -7,7 +7,6 @@ import re
 import time
 from PIL import Image, ImageStat
 
-# 尝试导入核心解包引擎
 try:
     from mobi.extract import extract as mobi_extract
 except ImportError:
@@ -23,7 +22,8 @@ KINDLE_HEIGHT = 1448
 
 def is_blank_page(img):
     """
-    终极去残算法 V12：融合阴影宽容、中心采样与 BFS 连续黑块侦测
+    终极去残算法 V15：中心锚定 + 墨水浓度检测
+    完美兼容章节留白页，精准狙杀脏扫描水印页
     """
     try:
         if img.width < 10 or img.height < 10: 
@@ -33,46 +33,35 @@ def is_blank_page(img):
         w, h = grayscale_img.width, grayscale_img.height
         total_pixels = w * h
         
+        # 1. 过滤全黑过渡页 (>95% 纯黑)
         hist = grayscale_img.histogram()
-        white_pixels = sum(hist[210:256])
-        if (white_pixels / total_pixels) >= 0.70:
+        if sum(hist[0:15]) / total_pixels > 0.95: 
             return True
 
-        center_crop = grayscale_img.crop((int(w*0.2), int(h*0.2), int(w*0.8), int(h*0.8)))
+        # 2. 核心区裁切：切掉四周边缘的 12% (完美避开书脊阴影、页边脏污和角落的水印)
+        crop_box = (int(w*0.12), int(h*0.12), int(w*0.88), int(h*0.88))
+        center_crop = grayscale_img.crop(crop_box)
+        cw, ch = center_crop.width, center_crop.height
+        ctotal = cw * ch
+
+        center_hist = center_crop.histogram()
         center_stat = ImageStat.Stat(center_crop)
-        if center_stat.stddev[0] < 8.0:
+
+        # 提取真正构成内容的“有效墨水”像素 (灰度值 < 180) 和 “纯白”像素 (灰度 > 240)
+        ink_pixels = sum(center_hist[0:180])
+        ink_ratio = ink_pixels / ctotal
+        white_pixels = sum(center_hist[240:256])
+        white_ratio = white_pixels / ctotal
+
+        stddev = center_stat.stddev[0]
+
+        # --- 判决逻辑 ---
+        # 规则 A：脏扫描件克星。中心区域有效墨水极少 (<0.5%) 且 没有剧烈线条对比 (方差<15)
+        if ink_ratio < 0.005 and stddev < 15.0: 
             return True
 
-        thumb_w, thumb_h = 50, 50
-        thumb = grayscale_img.resize((thumb_w, thumb_h), Image.Resampling.BILINEAR)
-        pixels = thumb.load()
-        
-        visited = set()
-        max_black_blob = 0
-        
-        for x in range(thumb_w):
-            for y in range(thumb_h):
-                if pixels[x, y] < 40 and (x, y) not in visited:
-                    queue = [(x, y)]
-                    visited.add((x, y))
-                    head = 0
-                    
-                    while head < len(queue):
-                        cx, cy = queue[head]
-                        head += 1
-                        
-                        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
-                            nx, ny = cx + dx, cy + dy
-                            if 0 <= nx < thumb_w and 0 <= ny < thumb_h:
-                                if (nx, ny) not in visited and pixels[nx, ny] < 40:
-                                    visited.add((nx, ny))
-                                    queue.append((nx, ny))
-                    
-                    if len(queue) > max_black_blob:
-                        max_black_blob = len(queue)
-                        
-        blob_ratio = max_black_blob / (thumb_w * thumb_h)
-        if blob_ratio >= 0.40:
+        # 规则 B：绝对的高清纯白页 (白底占99%以上)
+        if white_ratio > 0.99: 
             return True
 
     except Exception as e:
@@ -80,7 +69,6 @@ def is_blank_page(img):
     return False
 
 def parse_opf_for_images_and_meta(extract_dir):
-    """解析 OPF，还原阅读顺序，并提取原作者与出版社元数据"""
     print("正在破译 MOBI 排版说明书 (OPF/HTML)...")
     opf_file = None
     for root, dirs, files in os.walk(extract_dir):
@@ -91,7 +79,6 @@ def parse_opf_for_images_and_meta(extract_dir):
         if opf_file: break
         
     if not opf_file:
-        print("错误：无法在解包数据中找到目录树文件。")
         return [], "", ""
         
     with open(opf_file, 'r', encoding='utf-8', errors='ignore') as f:
@@ -134,7 +121,6 @@ def process_single_book(input_path, kindlegen_path, base_dir):
     name_without_ext = os.path.splitext(file_name)[0]
     output_name = f"{name_without_ext}_重构版.mobi"
     
-    # --- 核心新增：自动创建并接管 remake 收纳文件夹 ---
     remake_dir = os.path.join(target_dir, "remake")
     if not os.path.exists(remake_dir):
         os.makedirs(remake_dir, exist_ok=True)
@@ -156,7 +142,7 @@ def process_single_book(input_path, kindlegen_path, base_dir):
                 print("[-] 错误：未能提取到有效图片序列。")
                 return False
 
-            print("正在深度清洗空白废页并适配分辨率...")
+            print("正在深度清洗空白废页并重塑画质体积...")
             Image.MAX_IMAGE_PIXELS = None 
             valid_images = []
             
@@ -166,7 +152,7 @@ def process_single_book(input_path, kindlegen_path, base_dir):
                         img = img.convert('L')
                         
                         if is_blank_page(img):
-                            print(f"  [✂️ 拦截废页] {os.path.basename(img_path)}")
+                            print(f"  [✂️ 精准拦截废页] {os.path.basename(img_path)}")
                             continue 
 
                         width_ratio = KINDLE_WIDTH / img.width
@@ -179,7 +165,9 @@ def process_single_book(input_path, kindlegen_path, base_dir):
                         bg.paste(img_resized, ((KINDLE_WIDTH - new_width) // 2, (KINDLE_HEIGHT - new_height) // 2))
                         
                         out_filename = f"page_{len(valid_images):04d}.jpg"
-                        bg.save(os.path.join(temp_dir, out_filename), 'JPEG', quality=90) 
+                        # --- 核心新增：体积与画质控制优化 ---
+                        # 开启 Huffman 表优化，并使用适合墨水屏的 75 质量，体积将大幅缩减
+                        bg.save(os.path.join(temp_dir, out_filename), 'JPEG', quality=75, optimize=True) 
                         valid_images.append(out_filename)
                 except: pass
 
@@ -226,7 +214,6 @@ def process_single_book(input_path, kindlegen_path, base_dir):
             print("正在调用 KindleGen 编译底层...")
             subprocess.run([kindlegen_path, os.path.join(temp_dir, "content.opf"), "-c1", "-o", output_name, "-dont_append_source"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-            # --- 核心修改：将最终成品移动到 remake 文件夹中 ---
             output_target = os.path.join(remake_dir, output_name)
             if os.path.exists(output_target): os.remove(output_target)
             shutil.move(os.path.join(temp_dir, output_name), output_target)
