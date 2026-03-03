@@ -5,6 +5,8 @@ import subprocess
 import zipfile
 import re
 import time
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from PIL import Image, ImageStat
 
 try:
@@ -16,15 +18,10 @@ except ImportError:
     input("按回车键退出...")
     sys.exit(1)
 
-# --- Kindle 2022 入门款 硬件配置 ---
 KINDLE_WIDTH = 1072
 KINDLE_HEIGHT = 1448
 
 def is_blank_page(img):
-    """
-    终极去残算法 V15：中心锚定 + 墨水浓度检测
-    完美兼容章节留白页，精准狙杀脏扫描水印页
-    """
     try:
         if img.width < 10 or img.height < 10: 
             return True
@@ -33,12 +30,10 @@ def is_blank_page(img):
         w, h = grayscale_img.width, grayscale_img.height
         total_pixels = w * h
         
-        # 1. 过滤全黑过渡页 (>95% 纯黑)
         hist = grayscale_img.histogram()
         if sum(hist[0:15]) / total_pixels > 0.95: 
             return True
 
-        # 2. 核心区裁切：切掉四周边缘的 12% (完美避开书脊阴影、页边脏污和角落的水印)
         crop_box = (int(w*0.12), int(h*0.12), int(w*0.88), int(h*0.88))
         center_crop = grayscale_img.crop(crop_box)
         cw, ch = center_crop.width, center_crop.height
@@ -47,7 +42,6 @@ def is_blank_page(img):
         center_hist = center_crop.histogram()
         center_stat = ImageStat.Stat(center_crop)
 
-        # 提取真正构成内容的“有效墨水”像素 (灰度值 < 180) 和 “纯白”像素 (灰度 > 240)
         ink_pixels = sum(center_hist[0:180])
         ink_ratio = ink_pixels / ctotal
         white_pixels = sum(center_hist[240:256])
@@ -55,12 +49,9 @@ def is_blank_page(img):
 
         stddev = center_stat.stddev[0]
 
-        # --- 判决逻辑 ---
-        # 规则 A：脏扫描件克星。中心区域有效墨水极少 (<0.5%) 且 没有剧烈线条对比 (方差<15)
         if ink_ratio < 0.005 and stddev < 15.0: 
             return True
 
-        # 规则 B：绝对的高清纯白页 (白底占99%以上)
         if white_ratio > 0.99: 
             return True
 
@@ -69,7 +60,6 @@ def is_blank_page(img):
     return False
 
 def parse_opf_for_images_and_meta(extract_dir):
-    print("正在破译 MOBI 排版说明书 (OPF/HTML)...")
     opf_file = None
     for root, dirs, files in os.walk(extract_dir):
         for file in files:
@@ -112,10 +102,10 @@ def parse_opf_for_images_and_meta(extract_dir):
                          if os.path.exists(img_full_path) and img_full_path not in ordered_images:
                              ordered_images.append(img_full_path)
                                  
-    print(f"成功破译！锁定 {len(ordered_images)} 张图片" + (f" | 作者: {author}" if author else ""))
     return ordered_images, author, publisher
 
 def process_single_book(input_path, kindlegen_path, base_dir):
+    """单本书处理逻辑（为了适应并发，精简了部分控制台输出，防止刷屏错乱）"""
     target_dir = os.path.dirname(os.path.abspath(input_path))
     file_name = os.path.basename(input_path)
     name_without_ext = os.path.splitext(file_name)[0]
@@ -123,26 +113,25 @@ def process_single_book(input_path, kindlegen_path, base_dir):
     
     remake_dir = os.path.join(target_dir, "remake")
     if not os.path.exists(remake_dir):
-        os.makedirs(remake_dir, exist_ok=True)
-        print(f"  [+] 探测到新据点，已创建收纳目录: {remake_dir}")
+        try: os.makedirs(remake_dir, exist_ok=True)
+        except: pass
     
-    temp_dir = os.path.join(base_dir, f"temp_{int(time.time())}_{name_without_ext[:5]}")
+    # 临时目录增加进程ID，确保并发时绝对不会互相干扰
+    temp_dir = os.path.join(base_dir, f"temp_{os.getpid()}_{int(time.time())}_{name_without_ext[:5]}")
     if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
     os.makedirs(temp_dir)
 
-    print(f"\n>>> 开始处理: {file_name}")
+    print(f"[⌛ 开始] {file_name}")
     
     try:
-        print("正在解包...")
         temp_extract_dir, _ = mobi_extract(input_path)
         
         try:
             ordered_images, author, publisher = parse_opf_for_images_and_meta(temp_extract_dir)
             if not ordered_images:
-                print("[-] 错误：未能提取到有效图片序列。")
+                print(f"[-] 错误：{file_name} 未能提取到有效图片。")
                 return False
 
-            print("正在深度清洗空白废页并重塑画质体积...")
             Image.MAX_IMAGE_PIXELS = None 
             valid_images = []
             
@@ -150,9 +139,7 @@ def process_single_book(input_path, kindlegen_path, base_dir):
                 try:
                     with Image.open(img_path) as img:
                         img = img.convert('L')
-                        
                         if is_blank_page(img):
-                            print(f"  [✂️ 精准拦截废页] {os.path.basename(img_path)}")
                             continue 
 
                         width_ratio = KINDLE_WIDTH / img.width
@@ -165,15 +152,12 @@ def process_single_book(input_path, kindlegen_path, base_dir):
                         bg.paste(img_resized, ((KINDLE_WIDTH - new_width) // 2, (KINDLE_HEIGHT - new_height) // 2))
                         
                         out_filename = f"page_{len(valid_images):04d}.jpg"
-                        # --- 核心新增：体积与画质控制优化 ---
-                        # 开启 Huffman 表优化，并使用适合墨水屏的 75 质量，体积将大幅缩减
                         bg.save(os.path.join(temp_dir, out_filename), 'JPEG', quality=75, optimize=True) 
                         valid_images.append(out_filename)
                 except: pass
 
             if not valid_images: return False
 
-            print(f"实际保留有效页数: {len(valid_images)}。正在生成元数据...")
             html_files = []
             for img_file in valid_images:
                 html_name = img_file.replace('.jpg', '.html')
@@ -211,20 +195,20 @@ def process_single_book(input_path, kindlegen_path, base_dir):
             with open(os.path.join(temp_dir, "toc.ncx"), 'w', encoding='utf-8') as f:
                 f.write('<?xml version="1.0" encoding="UTF-8"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><navMap><navPoint id="p1" playOrder="1"><navLabel><text>Start</text></navLabel><content src="'+html_files[0]+'"/></navPoint></navMap></ncx>')
 
-            print("正在调用 KindleGen 编译底层...")
             subprocess.run([kindlegen_path, os.path.join(temp_dir, "content.opf"), "-c1", "-o", output_name, "-dont_append_source"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             output_target = os.path.join(remake_dir, output_name)
             if os.path.exists(output_target): os.remove(output_target)
             shutil.move(os.path.join(temp_dir, output_name), output_target)
-            print(f"[√] 成功收纳至: {os.path.join('remake', output_name)}")
+            
+            print(f"[✅ 成功] {file_name} -> 已收纳至 remake")
             return True
 
         finally:
             if os.path.exists(temp_extract_dir): shutil.rmtree(temp_extract_dir, ignore_errors=True)
 
     except Exception as e:
-        print(f"[X] 处理失败: {file_name} - {str(e)}")
+        print(f"[❌ 失败] {file_name} - {str(e)}")
         return False
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir, ignore_errors=True)
@@ -244,6 +228,9 @@ def collect_files(inputs):
     return targets
 
 if __name__ == "__main__":
+    # Nuitka/PyInstaller 多进程环境下的终极保命符，防止无限克隆自身死机
+    multiprocessing.freeze_support() 
+    
     try:
         if sys.platform.startswith('win'): os.system('chcp 65001 >nul')
         
@@ -257,7 +244,6 @@ if __name__ == "__main__":
         if not os.path.exists(KINDLEGEN_EXE_PATH):
             print("---------------------------------------------------------")
             print(f"致命错误：找不到 kindlegen.exe")
-            print(f"请将其放在目录: {BASE_DIR}")
             print("---------------------------------------------------------")
             input("按回车键退出..."); sys.exit(1)
 
@@ -271,22 +257,39 @@ if __name__ == "__main__":
             print("错误：未找到任何 .mobi 或 .azw3 文件。")
             input("按回车键退出..."); sys.exit(1)
 
+        # 智能计算并发数量：获取 CPU 核心数，保留 1 个核心给操作系统和鼠标，剩下的全部压榨！
+        max_workers = max(1, os.cpu_count() - 1)
+        
         print(f"==========================================")
-        print(f"共发现 {len(all_books)} 本书，准备开始批量处理...")
-        print(f"==========================================")
+        print(f"共发现 {len(all_books)} 本书。")
+        print(f"🚀 引擎点火：已征用 {max_workers} 个 CPU 核心进入并发狂暴模式！")
+        print(f"==========================================\n")
 
         success_count = 0
         fail_count = 0
 
-        for index, book_path in enumerate(all_books):
-            print(f"\n[{index+1}/{len(all_books)}] 正在处理...")
-            if process_single_book(book_path, KINDLEGEN_EXE_PATH, BASE_DIR):
-                success_count += 1
-            else:
-                fail_count += 1
+        # --- 核心：多进程并发执行池 ---
+        start_time = time.time()
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # 将所有书籍任务扔进线程池
+            future_to_book = {executor.submit(process_single_book, book, KINDLEGEN_EXE_PATH, BASE_DIR): book for book in all_books}
+            
+            # 监听完成状态
+            for future in as_completed(future_to_book):
+                try:
+                    if future.result():
+                        success_count += 1
+                    else:
+                        fail_count += 1
+                except Exception as exc:
+                    fail_count += 1
+                    print(f"[严重错误] 并发处理中断: {exc}")
+
+        end_time = time.time()
+        time_cost = round(end_time - start_time, 1)
 
         print(f"\n==========================================")
-        print(f"全部任务结束！")
+        print(f"🏁 全部任务并发生死速结束！总耗时: {time_cost} 秒")
         print(f"成功: {success_count} 本 | 失败: {fail_count} 本")
         print(f"==========================================")
         
