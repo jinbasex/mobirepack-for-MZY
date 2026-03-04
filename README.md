@@ -1,16 +1,56 @@
-# mobirepack-for-MZY
-  一个针对漫自由漫画站，对mobi重新为kpw3 kindle 2022等 对应dpi的设备进行重新打包的软件
+<div align="center">
+
+# mobirepack-for-MZY 🚀
+### 一个极致纯粹、性能狂暴的 針對漫自由 mobi 漫画重构引擎
+
+![Platform](https://img.shields.io/badge/Platform-Windows-blue?style=for-the-badge&logo=windows)
+![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
+![Build](https://img.shields.io/badge/Build-Nuitka-orange?style=for-the-badge&logo=python)
+
+</div>
+
+---
+
+## 📖 简介
+
+受够了 KCC (Kindle Comic Converter) 打包漫画时的乱序、恼人的空白扫描废页，以及动辄几百 MB 的臃肿体积？
+
+**mobirepack-for-MZY** 是一个基于底层物理像素分析的自动化处理工具。它抛弃了传统带 GUI 的臃肿框架，使用 C 语言级编译（Nuitka），无需安装任何环境，双击即走，将你的 CPU 压榨到极致，为你还原最完美的墨水屏阅读体验。
+
+## ✨ 核心黑科技
+
+* 🚀 **多进程并发引擎**：彻底打破单线程瓶颈，智能征用所有 CPU 核心。拖入整个漫画文件夹，体验瞬间拉满的物理级并发处理速度。
+* 🎨 **全彩封面嗅探**：首图（封面）自动保留最高画质（Quality=85）与 RGB 全彩，完美点亮 calibre-web 海报墙；内页应用极致灰阶压缩（Quality=75），体积直接砍半。
+* 🗑️ **智能去残算法 (V15)**：搭载极度优雅的“中心锚定 + 墨水浓度检测”视觉算法。自动切除书脊阴影与边缘水印，精准狙杀毫无内容的脏扫描页和空白页，同时完美放行章节留白。
+* 🧩 **秩序重组与血统保留**：通过逆向解密原始 OPF 指针，100% 修复图片乱序问题。同时自动抓取并刻录原版 `<dc:creator>` (作者) 与 `<dc:publisher>` (出版社) 元数据。
+* 📁 **强迫症收纳**：全自动在源文件目录下建立 `remake` 专属收纳库，成品整齐排列，不留任何环境残渣。
+* 📱 **物理级全屏适配**：针对 Kindle 2022 (1072x1448) 像素点对点缩放，强制开启原生零边距全屏。
+
+---
+
+## 🛠️ 快速开始
+
+### 1. 准备环境
+* 下载本仓库 Release 页面最新的 `repack.zip` 并解压。
 
 
-## 🛠️如何使用
-  下载解包之后
-  在 [漫自由](https://mhx12.com/)  下载mobi漫画资源后 直接将整个文件夹或者文件拖到py 或者exe文件即可
+> **⚠️ 核心警告**：
+> 本程序仅适用于 **无 DRM 加密** 的 `.mobi` 或 `.azw3` 漫画文件。
 
-  如果使用py需要补充对应的依赖库 
+### 2. 一键重构
+* **单本处理**：直接将 `.mobi` 或 `.azw3` 文件拖拽到 `repack.exe` 图标上。
+* **并发批量**：框选几十本漫画，或者**直接拖拽整个包含漫画的文件夹**到程序图标上。
+* 喝口水，听一听风扇咆哮的声音。处理完成后，成品将自动归纳在源目录的 `remake` 文件夹中。
 
-  exe已打包依赖库 可直接使用
+---
 
- ❤️❤️❤️感谢 [书伴](https://bookfere.com/post/92.html#kg_1)  提供的kindlegen文件❤️❤️❤️
-  
-## 🚀 文件下载
- [点击下载repack.zip](https://github.com/jinbasex/mobirepack-for-MZY/releases)
+## 💡 常见问题
+
+**Q: 为什么处理时 CPU 占用率会到 100%？** A: 这是刻意为之的设计。工具会获取你电脑的最大核心数（保留 1 核维持系统运转），将剩余算力全部投入并发池，以换取碾压级的处理速度。
+
+**Q: 为什么生成的体积变小了？** A: 因为程序应用了专为墨水屏 16 级灰阶设计的 Huffman 压缩与 75% 黄金画质阈值，在肉眼无损的前提下大幅剔除了冗余数据。
+
+---
+
+## ⚖️ 许可证
+本项目采用 [MIT License](LICENSE) 协议开源。你可以自由使用、修改和分发，但请保留原作者声明。
