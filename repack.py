@@ -105,7 +105,6 @@ def parse_opf_for_images_and_meta(extract_dir):
     return ordered_images, author, publisher
 
 def process_single_book(input_path, kindlegen_path, base_dir):
-    """单本书处理逻辑（为了适应并发，精简了部分控制台输出，防止刷屏错乱）"""
     target_dir = os.path.dirname(os.path.abspath(input_path))
     file_name = os.path.basename(input_path)
     name_without_ext = os.path.splitext(file_name)[0]
@@ -116,7 +115,6 @@ def process_single_book(input_path, kindlegen_path, base_dir):
         try: os.makedirs(remake_dir, exist_ok=True)
         except: pass
     
-    # 临时目录增加进程ID，确保并发时绝对不会互相干扰
     temp_dir = os.path.join(base_dir, f"temp_{os.getpid()}_{int(time.time())}_{name_without_ext[:5]}")
     if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
     os.makedirs(temp_dir)
@@ -138,21 +136,35 @@ def process_single_book(input_path, kindlegen_path, base_dir):
             for img_path in ordered_images:
                 try:
                     with Image.open(img_path) as img:
-                        img = img.convert('L')
-                        if is_blank_page(img):
+                        # --- 核心改动：彩色封面嗅探 ---
+                        # 如果 valid_images 还是空的，说明这是我们要保留的第一张图（封面）
+                        is_cover = (len(valid_images) == 0)
+                        
+                        # 封面保留 RGB 全彩，内页转为 L 灰度
+                        process_img = img.convert('RGB') if is_cover else img.convert('L')
+                        
+                        if is_blank_page(process_img):
                             continue 
 
-                        width_ratio = KINDLE_WIDTH / img.width
-                        height_ratio = KINDLE_HEIGHT / img.height
+                        width_ratio = KINDLE_WIDTH / process_img.width
+                        height_ratio = KINDLE_HEIGHT / process_img.height
                         scale = min(width_ratio, height_ratio)
-                        new_width, new_height = int(img.width * scale), int(img.height * scale)
+                        new_width, new_height = int(process_img.width * scale), int(process_img.height * scale)
                         
-                        img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                        bg = Image.new('L', (KINDLE_WIDTH, KINDLE_HEIGHT), 255)
+                        img_resized = process_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                        
+                        # 封面使用纯白 RGB 画布，内页使用纯白灰度画布
+                        if is_cover:
+                            bg = Image.new('RGB', (KINDLE_WIDTH, KINDLE_HEIGHT), (255, 255, 255))
+                            save_quality = 85 # 封面给予更高画质
+                        else:
+                            bg = Image.new('L', (KINDLE_WIDTH, KINDLE_HEIGHT), 255)
+                            save_quality = 75 # 内页极限压缩
+                            
                         bg.paste(img_resized, ((KINDLE_WIDTH - new_width) // 2, (KINDLE_HEIGHT - new_height) // 2))
                         
                         out_filename = f"page_{len(valid_images):04d}.jpg"
-                        bg.save(os.path.join(temp_dir, out_filename), 'JPEG', quality=75, optimize=True) 
+                        bg.save(os.path.join(temp_dir, out_filename), 'JPEG', quality=save_quality, optimize=True) 
                         valid_images.append(out_filename)
                 except: pass
 
@@ -228,7 +240,6 @@ def collect_files(inputs):
     return targets
 
 if __name__ == "__main__":
-    # Nuitka/PyInstaller 多进程环境下的终极保命符，防止无限克隆自身死机
     multiprocessing.freeze_support() 
     
     try:
@@ -257,7 +268,6 @@ if __name__ == "__main__":
             print("错误：未找到任何 .mobi 或 .azw3 文件。")
             input("按回车键退出..."); sys.exit(1)
 
-        # 智能计算并发数量：获取 CPU 核心数，保留 1 个核心给操作系统和鼠标，剩下的全部压榨！
         max_workers = max(1, os.cpu_count() - 1)
         
         print(f"==========================================")
@@ -268,13 +278,10 @@ if __name__ == "__main__":
         success_count = 0
         fail_count = 0
 
-        # --- 核心：多进程并发执行池 ---
         start_time = time.time()
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # 将所有书籍任务扔进线程池
             future_to_book = {executor.submit(process_single_book, book, KINDLEGEN_EXE_PATH, BASE_DIR): book for book in all_books}
             
-            # 监听完成状态
             for future in as_completed(future_to_book):
                 try:
                     if future.result():
